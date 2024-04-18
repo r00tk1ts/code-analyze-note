@@ -1,6 +1,6 @@
 C++ json库在设计上所要解决的核心问题就在于：如何提供优雅直观的接口去像JS,Python那样操作json对象。在此基础上，再将性能发挥到极致。
 
-Json本身是一个字符串，它有着特定的fmt，为了能够灵活操作，库设计者需要去把它parse成一个对象，使用设计好的接口去便捷高效操作它。
+Json本身是一个字符串，它有着特定的制式，为了能够灵活操作，库设计者需要去把它解析成一个对象，使用设计好的接口去便捷高效操作它。
 
 C++发展了这么多年，诞生了许多知名的json库，这其中，热度最高的便是：[nlohmann/json](https://github.com/sponsors/nlohmann)
 
@@ -1524,7 +1524,7 @@ class parser {
 	        json_sax_dom_parser<BasicJsonType> sdp(result, allow_exceptions);  
 	        // 下面的函数就是解析整个json的核心实现
 	        sax_parse_internal(&sdp);  
-	  
+	        
 	        // in strict mode, input must be completely read  
 	        if (strict && (get_token() != token_type::end_of_input))  
 	        {  
@@ -1574,53 +1574,63 @@ class json_sax_dom_parser
     using number_float_t = typename BasicJsonType::number_float_t;  
     using string_t = typename BasicJsonType::string_t;  
     using binary_t = typename BasicJsonType::binary_t;  
-  
-    /*!  
-    @param[in,out] r  reference to a JSON value that is manipulated while                       parsing    @param[in] allow_exceptions_  whether parse errors yield exceptions    */    explicit json_sax_dom_parser(BasicJsonType& r, const bool allow_exceptions_ = true)  
+
+	// 引用型成员root就是最终basic_json树的根
+	// 构造器初始化列表中予以关联，即外部的result对象
+    explicit json_sax_dom_parser(BasicJsonType& r, const bool allow_exceptions_ = true)  
         : root(r), allow_exceptions(allow_exceptions_)  
     {}  
   
     // make class move-only  
     json_sax_dom_parser(const json_sax_dom_parser&) = delete;  
-    json_sax_dom_parser(json_sax_dom_parser&&) = default; // NOLINT(hicpp-noexcept-move,performance-noexcept-move-constructor)  
+    json_sax_dom_parser(json_sax_dom_parser&&) = default; 
     json_sax_dom_parser& operator=(const json_sax_dom_parser&) = delete;  
-    json_sax_dom_parser& operator=(json_sax_dom_parser&&) = default; // NOLINT(hicpp-noexcept-move,performance-noexcept-move-constructor)  
+    json_sax_dom_parser& operator=(json_sax_dom_parser&&) = default;  
     ~json_sax_dom_parser() = default;  
-  
+
+	// 提供下面这一组SAX DOM接口，对不同的类型做不同的处理
+	// 核心实现封装在了内部函数模板handle_value
     bool null()  
     {  
         handle_value(nullptr);  
-        return true;    }  
+        return true;    
+    }  
   
     bool boolean(bool val)  
     {  
         handle_value(val);  
-        return true;    }  
+        return true;    
+    }  
   
     bool number_integer(number_integer_t val)  
     {  
         handle_value(val);  
-        return true;    }  
+        return true;       
+    }  
   
     bool number_unsigned(number_unsigned_t val)  
     {  
         handle_value(val);  
-        return true;    }  
+        return true;    
+    }  
   
     bool number_float(number_float_t val, const string_t& /*unused*/)  
     {  
         handle_value(val);  
-        return true;    }  
+        return true;   
+    }  
   
     bool string(string_t& val)  
     {  
         handle_value(val);  
-        return true;    }  
+        return true;       
+    }  
   
     bool binary(binary_t& val)  
     {  
         handle_value(std::move(val));  
-        return true;    }  
+        return true;    
+    }  
   
     bool start_object(std::size_t len)  
     {  
@@ -1692,19 +1702,19 @@ class json_sax_dom_parser
     }  
   
   private:  
-    /*!  
-    @invariant If the ref stack is empty, then the passed value will be the new               root.    @invariant If the ref stack contains a value, then it is an array or an               object to which we can add elements    */    template<typename Value>  
-    JSON_HEDLEY_RETURNS_NON_NULL  
+	// 核心值处理函数
+    template<typename Value>  
     BasicJsonType* handle_value(Value&& v)  
     {  
+	    // 如果ref stack为空，此时要处理的value就是根
         if (ref_stack.empty())  
         {  
             root = BasicJsonType(std::forward<Value>(v));  
             return &root;  
         }  
-  
+		// 否则，ref stack包含的值就是一个数组或对象
         JSON_ASSERT(ref_stack.back()->is_array() || ref_stack.back()->is_object());  
-  
+	
         if (ref_stack.back()->is_array())  
         {  
             ref_stack.back()->m_data.m_value.array->emplace_back(std::forward<Value>(v));  
@@ -1720,6 +1730,8 @@ class json_sax_dom_parser
     /// the parsed JSON value  
     BasicJsonType& root;  
     /// stack to model hierarchy of values  
+    // 整个parser的设计核心就是这个堆栈，它用来配合外部的解析函数去check
+    // json字符串的对称性
     std::vector<BasicJsonType*> ref_stack {};  
     /// helper to hold the reference for the next object element  
     BasicJsonType* object_element = nullptr;  
@@ -1728,4 +1740,443 @@ class json_sax_dom_parser
     /// whether to throw exceptions in case of errors  
     const bool allow_exceptions = true;  
 };
+```
+
+##### `sex_parse_internal`
+
+在初步了解了`json_sax_dom_parser`提供的接口能力后，我们再看核心函数`sex_parse_internal`的实现：
+
+```cpp
+// 参数sax就是上面构造好的json_sax_dom_parser<basic_json>对象
+// json_sax_dom_parser只是提供SAX DOM标准接口，本身没有做解析工作
+// 真正的解析工作是由parser的成员函数sax_parse_internal来完成的
+template<typename SAX>   
+bool sax_parse_internal(SAX* sax)  
+{  
+    // stack to remember the hierarchy of structured values we are parsing  
+    // true = array; false = object    
+    std::vector<bool> states;  
+    // value to avoid a goto (see comment where set to true)  
+    bool skip_to_state_evaluation = false;  
+  
+    while (true)  
+    {  
+        if (!skip_to_state_evaluation)  
+        {  
+            // invariant: get_token() was called before each iteration
+            // 构造parser对象时会立即执行一次get_token，所以初始时last_token是有值的  
+            switch (last_token)  
+            {  
+                case token_type::begin_object:  
+                {  
+                    if (JSON_HEDLEY_UNLIKELY(!sax->start_object(static_cast<std::size_t>(-1))))  
+                    {  
+                        return false;  
+                    }  
+  
+                    // closing } -> we are done  
+                    if (get_token() == token_type::end_object)  
+                    {  
+                        if (JSON_HEDLEY_UNLIKELY(!sax->end_object()))  
+                        {  
+                            return false;  
+                        }  
+                        break;  
+                    }  
+  
+                    // parse key  
+                    if (JSON_HEDLEY_UNLIKELY(last_token != token_type::value_string))  
+                    {  
+                        return sax->parse_error(m_lexer.get_position(),  
+                                                m_lexer.get_token_string(),  
+                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::value_string, "object key"), nullptr));  
+                    }  
+                    if (JSON_HEDLEY_UNLIKELY(!sax->key(m_lexer.get_string())))  
+                    {  
+                        return false;  
+                    }  
+  
+                    // parse separator (:)  
+                    if (JSON_HEDLEY_UNLIKELY(get_token() != token_type::name_separator))  
+                    {  
+                        return sax->parse_error(m_lexer.get_position(),  
+                                                m_lexer.get_token_string(),  
+                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::name_separator, "object separator"), nullptr));  
+                    }  
+  
+                    // remember we are now inside an object  
+                    states.push_back(false);  
+  
+                    // parse values  
+                    get_token();  
+                    continue;                }  
+  
+                case token_type::begin_array:  
+                {  
+                    if (JSON_HEDLEY_UNLIKELY(!sax->start_array(static_cast<std::size_t>(-1))))  
+                    {  
+                        return false;  
+                    }  
+  
+                    // closing ] -> we are done  
+                    if (get_token() == token_type::end_array)  
+                    {  
+                        if (JSON_HEDLEY_UNLIKELY(!sax->end_array()))  
+                        {  
+                            return false;  
+                        }  
+                        break;  
+                    }  
+  
+                    // remember we are now inside an array  
+                    states.push_back(true);  
+  
+                    // parse values (no need to call get_token)  
+                    continue;  
+                }  
+  
+                case token_type::value_float:  
+                {  
+                    const auto res = m_lexer.get_number_float();  
+  
+                    if (JSON_HEDLEY_UNLIKELY(!std::isfinite(res)))  
+                    {  
+                        return sax->parse_error(m_lexer.get_position(),  
+                                                m_lexer.get_token_string(),  
+                                                out_of_range::create(406, concat("number overflow parsing '", m_lexer.get_token_string(), '\''), nullptr));  
+                    }  
+  
+                    if (JSON_HEDLEY_UNLIKELY(!sax->number_float(res, m_lexer.get_string())))  
+                    {  
+                        return false;  
+                    }  
+  
+                    break;  
+                }  
+  
+                case token_type::literal_false:  
+                {  
+                    if (JSON_HEDLEY_UNLIKELY(!sax->boolean(false)))  
+                    {  
+                        return false;  
+                    }  
+                    break;  
+                }  
+  
+                case token_type::literal_null:  
+                {  
+                    if (JSON_HEDLEY_UNLIKELY(!sax->null()))  
+                    {  
+                        return false;  
+                    }  
+                    break;  
+                }  
+  
+                case token_type::literal_true:  
+                {  
+                    if (JSON_HEDLEY_UNLIKELY(!sax->boolean(true)))  
+                    {  
+                        return false;  
+                    }  
+                    break;  
+                }  
+  
+                case token_type::value_integer:  
+                {  
+                    if (JSON_HEDLEY_UNLIKELY(!sax->number_integer(m_lexer.get_number_integer())))  
+                    {  
+                        return false;  
+                    }  
+                    break;  
+                }  
+  
+                case token_type::value_string:  
+                {  
+                    if (JSON_HEDLEY_UNLIKELY(!sax->string(m_lexer.get_string())))  
+                    {  
+                        return false;  
+                    }  
+                    break;  
+                }  
+  
+                case token_type::value_unsigned:  
+                {  
+                    if (JSON_HEDLEY_UNLIKELY(!sax->number_unsigned(m_lexer.get_number_unsigned())))  
+                    {  
+                        return false;  
+                    }  
+                    break;  
+                }  
+  
+                case token_type::parse_error:  
+                {  
+                    // using "uninitialized" to avoid "expected" message  
+                    return sax->parse_error(m_lexer.get_position(),  
+                                            m_lexer.get_token_string(),  
+                                            parse_error::create(101, m_lexer.get_position(), exception_message(token_type::uninitialized, "value"), nullptr));  
+                }  
+                case token_type::end_of_input:  
+                {  
+                    if (JSON_HEDLEY_UNLIKELY(m_lexer.get_position().chars_read_total == 1))  
+                    {  
+                        return sax->parse_error(m_lexer.get_position(),  
+                                                m_lexer.get_token_string(),  
+                                                parse_error::create(101, m_lexer.get_position(),  
+                                                        "attempting to parse an empty input; check that your input string or stream contains the expected JSON", nullptr));  
+                    }  
+  
+                    return sax->parse_error(m_lexer.get_position(),  
+                                            m_lexer.get_token_string(),  
+                                            parse_error::create(101, m_lexer.get_position(), exception_message(token_type::literal_or_value, "value"), nullptr));  
+                }  
+                case token_type::uninitialized:  
+                case token_type::end_array:  
+                case token_type::end_object:  
+                case token_type::name_separator:  
+                case token_type::value_separator:  
+                case token_type::literal_or_value:  
+                default: // the last token was unexpected  
+                {  
+                    return sax->parse_error(m_lexer.get_position(),  
+                                            m_lexer.get_token_string(),  
+                                            parse_error::create(101, m_lexer.get_position(), exception_message(token_type::literal_or_value, "value"), nullptr));  
+                }  
+            }  
+        }  
+        else  
+        {  
+            skip_to_state_evaluation = false;  
+        }  
+  
+        // we reached this line after we successfully parsed a value  
+        if (states.empty())  
+        {  
+            // empty stack: we reached the end of the hierarchy: done  
+            return true;  
+        }  
+  
+        if (states.back())  // array  
+        {  
+            // comma -> next value  
+            if (get_token() == token_type::value_separator)  
+            {  
+                // parse a new value  
+                get_token();  
+                continue;            }  
+  
+            // closing ]  
+            if (JSON_HEDLEY_LIKELY(last_token == token_type::end_array))  
+            {  
+                if (JSON_HEDLEY_UNLIKELY(!sax->end_array()))  
+                {  
+                    return false;  
+                }  
+  
+                // We are done with this array. Before we can parse a  
+                // new value, we need to evaluate the new state first.                // By setting skip_to_state_evaluation to false, we                // are effectively jumping to the beginning of this if.                JSON_ASSERT(!states.empty());  
+                states.pop_back();  
+                skip_to_state_evaluation = true;  
+                continue;            }  
+  
+            return sax->parse_error(m_lexer.get_position(),  
+                                    m_lexer.get_token_string(),  
+                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_array, "array"), nullptr));  
+        }  
+  
+        // states.back() is false -> object  
+  
+        // comma -> next value        if (get_token() == token_type::value_separator)  
+        {  
+            // parse key  
+            if (JSON_HEDLEY_UNLIKELY(get_token() != token_type::value_string))  
+            {  
+                return sax->parse_error(m_lexer.get_position(),  
+                                        m_lexer.get_token_string(),  
+                                        parse_error::create(101, m_lexer.get_position(), exception_message(token_type::value_string, "object key"), nullptr));  
+            }  
+  
+            if (JSON_HEDLEY_UNLIKELY(!sax->key(m_lexer.get_string())))  
+            {  
+                return false;  
+            }  
+  
+            // parse separator (:)  
+            if (JSON_HEDLEY_UNLIKELY(get_token() != token_type::name_separator))  
+            {  
+                return sax->parse_error(m_lexer.get_position(),  
+                                        m_lexer.get_token_string(),  
+                                        parse_error::create(101, m_lexer.get_position(), exception_message(token_type::name_separator, "object separator"), nullptr));  
+            }  
+  
+            // parse values  
+            get_token();  
+            continue;        }  
+  
+        // closing }  
+        if (JSON_HEDLEY_LIKELY(last_token == token_type::end_object))  
+        {  
+            if (JSON_HEDLEY_UNLIKELY(!sax->end_object()))  
+            {  
+                return false;  
+            }  
+  
+            // We are done with this object. Before we can parse a  
+            // new value, we need to evaluate the new state first.            // By setting skip_to_state_evaluation to false, we            // are effectively jumping to the beginning of this if.            JSON_ASSERT(!states.empty());  
+            states.pop_back();  
+            skip_to_state_evaluation = true;  
+            continue;        }  
+  
+        return sax->parse_error(m_lexer.get_position(),  
+                                m_lexer.get_token_string(),  
+                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_object, "object"), nullptr));  
+    }  
+}
+```
+
+整个设计上是一个状态机，代码虽长，但可以分两段来看。第一段针对`skip_to_state_evaluation`的if-else处理部分，整体是对token类型按照json的设计制式来逐步处理。我们先分类讨论下几种情况：
+
+**对象型**
+
+```cpp
+case token_type::begin_object:  
+{  
+	
+    if (JSON_HEDLEY_UNLIKELY(!sax->start_object(static_cast<std::size_t>(-1))))  
+    {  
+        return false;  
+    }  
+
+	......
+
+// --------------------------------------------------------------------
+bool start_object(std::size_t len)  
+{  
+	// json_sax_dom_parser会使用handle_value构造一个对象型basic_json
+	// 置入ref_stack并返回
+	ref_stack.push_back(handle_value(BasicJsonType::value_t::object));  
+
+    if (JSON_HEDLEY_UNLIKELY(len != static_cast<std::size_t>(-1) && len > ref_stack.back()->max_size()))  
+    {  
+        JSON_THROW(out_of_range::create(408, concat("excessive object size: ", std::to_string(len)), ref_stack.back()));  
+    }  
+  
+    return true;  
+}
+// --------------------------------------------------------------------
+    // closing } -> we are done  
+    // 如果在{的后面紧跟着的是一个}，那就是个空对象
+    if (get_token() == token_type::end_object)  
+    {  
+        if (JSON_HEDLEY_UNLIKELY(!sax->end_object()))  
+        {  
+            return false;  
+        }  
+        break;  
+    }  
+// --------------------------------------------------------------------
+bool end_object()  
+{  
+	// 调用end_object必定意味着前面已经有一个start_object调用过了
+	// 此时ref_stack必不能为空，且因对称性，最后一个成员必定是一个对象型
+	// 否则就是json串不符合规矩
+    JSON_ASSERT(!ref_stack.empty());  
+    JSON_ASSERT(ref_stack.back()->is_object());  
+
+	// 诊断debug用，记录该对象本身的父子对象关系，先忽略
+    ref_stack.back()->set_parents();  
+    // 此时这个对象就处理完了，该出栈了
+    ref_stack.pop_back();  
+    return true;
+}
+// --------------------------------------------------------------------
+    // parse key  
+    // 一个{后面紧跟着的应该是个字符串key，如果不是就说明json串有误
+    if (JSON_HEDLEY_UNLIKELY(last_token != token_type::value_string))  
+    {  
+        return sax->parse_error(m_lexer.get_position(),  
+                                m_lexer.get_token_string(),  
+                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::value_string, "object key"), nullptr));  
+    }  
+    // 调用key接口处理key
+    if (JSON_HEDLEY_UNLIKELY(!sax->key(m_lexer.get_string())))  
+    {  
+        return false;  
+    }  
+// --------------------------------------------------------------------
+bool key(string_t& val)  
+{  
+    JSON_ASSERT(!ref_stack.empty());  
+    JSON_ASSERT(ref_stack.back()->is_object());  
+  
+    // add null at given key and store the reference for later  
+    // 将临时对象指针object_element指向obj型basic_json的value对象
+    // 此处通过其operator[]寻址运算符，默认情况下m_value.object是个std::map
+    object_element = &(ref_stack.back()->m_data.m_value.object->operator[](val));  
+    return true;
+}
+// --------------------------------------------------------------------
+    // parse separator (:)  
+    // key之后紧跟着的得是个冒号分隔符
+    if (JSON_HEDLEY_UNLIKELY(get_token() != token_type::name_separator))  
+    {  
+        return sax->parse_error(m_lexer.get_position(),  
+                                m_lexer.get_token_string(),  
+                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::name_separator, "object separator"), nullptr));  
+    }  
+
+    // remember we are now inside an object  
+    // 每次处理一个对象型，就记录一个false到states
+    states.push_back(false);  
+	
+    // parse values  
+    // 处理value，value可能有复杂的嵌套
+    // 所以先get_token()读入value，然后重新走switch-case状态机，所以continue
+    get_token();  
+    continue;
+}
+```
+
+**数组型**
+
+```cpp
+case token_type::begin_array:  
+{  
+	// 调用start_array去记录一个数组
+    if (JSON_HEDLEY_UNLIKELY(!sax->start_array(static_cast<std::size_t>(-1))))  
+    {  
+        return false;  
+    }  
+// --------------------------------------------------------------------
+bool start_array(std::size_t len)  
+{  
+	// 生成一个array型basic_json对象，置入ref stack
+    ref_stack.push_back(handle_value(BasicJsonType::value_t::array));  
+  
+    if (JSON_HEDLEY_UNLIKELY(len != static_cast<std::size_t>(-1) && len > ref_stack.back()->max_size()))  
+    {  
+        JSON_THROW(out_of_range::create(408, concat("excessive array size: ", std::to_string(len)), ref_stack.back()));  
+    }  
+  
+    return true;  
+}
+// --------------------------------------------------------------------
+    // closing ] -> we are done  
+    // [之后可能紧跟着]，做一下处理
+    if (get_token() == token_type::end_array)  
+    {  
+        if (JSON_HEDLEY_UNLIKELY(!sax->end_array()))  
+        {  
+            return false;  
+        }  
+        break;  
+    }  
+	// 记录一下，当前在处理一个array，使用true表示array
+    // remember we are now inside an array  
+    states.push_back(true);  
+  
+    // parse values (no need to call get_token)  
+    // 数组是没有key的，只有value，所以和obj类似，也是通过continue
+    // 回到switch-case状态机重新处理
+    continue;  
+}
 ```
