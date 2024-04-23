@@ -2090,14 +2090,14 @@ bool end_object()
 }
 // --------------------------------------------------------------------
     // parse key  
-    // 一个{后面紧跟着的应该是个字符串key，如果不是就说明json串有误
+    // 一个{后面紧跟着的不是}就是个key，如果不是就说明json串有误
     if (JSON_HEDLEY_UNLIKELY(last_token != token_type::value_string))  
     {  
         return sax->parse_error(m_lexer.get_position(),  
                                 m_lexer.get_token_string(),  
                                 parse_error::create(101, m_lexer.get_position(), exception_message(token_type::value_string, "object key"), nullptr));  
     }  
-    // 调用key接口处理key
+    // 调用key接口生成key型对象
     if (JSON_HEDLEY_UNLIKELY(!sax->key(m_lexer.get_string())))  
     {  
         return false;  
@@ -2125,12 +2125,14 @@ bool key(string_t& val)
     }  
 
     // remember we are now inside an object  
+    // push入栈，处理完成后会pop
     // 每次处理一个对象型，就记录一个false到states
     states.push_back(false);  
 	
     // parse values  
     // 处理value，value可能有复杂的嵌套
-    // 所以先get_token()读入value，然后重新走switch-case状态机，所以continue
+    // 所以先get_token()更新下一个token到last_token
+    // 然后重新走switch-case状态机，即continue
     get_token();  
     continue;
 }
@@ -2161,16 +2163,19 @@ bool start_array(std::size_t len)
 }
 // --------------------------------------------------------------------
     // closing ] -> we are done  
-    // [之后可能紧跟着]，做一下处理
+    // get_token读入下一个token，更新last_token
+    // 如果[之后紧跟着]（空数组），则做一下处理
     if (get_token() == token_type::end_array)  
     {  
         if (JSON_HEDLEY_UNLIKELY(!sax->end_array()))  
         {  
             return false;  
         }  
+        // 此时表示数组已经结束了，跳出整个switch-case做善后处理
         break;  
     }  
-	// 记录一下，当前在处理一个array，使用true表示array
+	// 处理嵌套型对象，要push，使用true表示array
+	// 处理完成后会pop
     // remember we are now inside an array  
     states.push_back(true);  
   
@@ -2178,5 +2183,172 @@ bool start_array(std::size_t len)
     // 数组是没有key的，只有value，所以和obj类似，也是通过continue
     // 回到switch-case状态机重新处理
     continue;  
+}
+```
+
+我们假设数组里存储的都是有符号数，来看一下重进while循环switch-case后的处理流程：
+```cpp
+// 这一次last_token是个有符号整型数
+case token_type::value_integer:  
+{  
+	// 生成有符号整型数的basic_json对象
+	if (JSON_HEDLEY_UNLIKELY(!sax->number_integer(m_lexer.get_number_integer())))  
+	{  
+		return false;  
+	}  
+	// 处理了一个整型数后，跳出switch-case
+	break;  
+}
+// --------------------------------------------------------------------
+bool number_integer(number_integer_t val)  
+{  
+	// 最终都是在泛型函数内处理
+    handle_value(val);  
+    return true;
+}
+```
+看一下跳出switch-case后的继续处理：
+```cpp
+while (true) {
+	// switch-case
+	...
+	
+	// we reached this line after we successfully parsed a value  
+	// 由于每次开始处理一个数组或是对象这种嵌套对象时，都会push一个true/false进去
+	// 而在处理完毕后会pop出来，所以一旦states为空，则表示到达了终态
+	if (states.empty())  
+	{  
+	    // empty stack: we reached the end of the hierarchy: done  
+	    return true;  
+	}  
+	// if里处理array型，else里处理obj型
+	// 我们会走到这个循环里
+	if (states.back())  // array  
+	{  
+	    // comma -> next value  
+	    // get_token更新下一个token到last_token
+	    // 下一个token要么应该是分隔符，要么就是]，否则就是非法的json
+	    // 处理到分隔符时，跳过分隔符，继续获取下一个token
+	    // 重入switch-case，所以continue
+	    if (get_token() == token_type::value_separator)  
+	    {  
+	        // parse a new value  
+	        get_token();  
+	        continue;    
+	    }  
+		// 如果是]，那就处理end_array
+	    // closing ]  
+	    if (JSON_HEDLEY_LIKELY(last_token == token_type::end_array))  
+	    {  
+	        if (JSON_HEDLEY_UNLIKELY(!sax->end_array()))  
+	        {  
+	            return false;  
+	        }  
+	  
+	        // We are done with this array. Before we can parse a  
+	        // new value, we need to evaluate the new state first.        
+	        // By setting skip_to_state_evaluation to false, we        
+	        // are effectively jumping to the beginning of this if.       
+	        JSON_ASSERT(!states.empty());  
+		    // 走到这里就说明整个数组已经处理完了，此时应该pop，重入循环
+	        states.pop_back();  
+	        // 重入循环后，下一次要跳过switch-case
+	        // 故对skip_to_state_evaluation置true
+	        skip_to_state_evaluation = true;  
+	        continue;    
+		}  
+	  
+	    return sax->parse_error(m_lexer.get_position(),  
+	                            m_lexer.get_token_string(),  
+	                            parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_array, "array"), nullptr));  
+	}  
+	  
+	// states.back() is false -> object  
+	// 否则就表示当前是个obj
+	// 读入下一个token，它要么是, 要么是}
+	// comma -> next value  
+	if (get_token() == token_type::value_separator)  
+	{  
+	    // parse key  
+	    // 处理下一个key，他得是个string
+	    if (JSON_HEDLEY_UNLIKELY(get_token() != token_type::value_string))  
+	    {  
+	        return sax->parse_error(m_lexer.get_position(),  
+	                                m_lexer.get_token_string(),  
+	                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::value_string, "object key"), nullptr));  
+	    }  
+	  
+	    if (JSON_HEDLEY_UNLIKELY(!sax->key(m_lexer.get_string())))  
+	    {  
+	        return false;  
+	    }  
+		// 处理kv分隔符
+	    // parse separator (:)  
+	    if (JSON_HEDLEY_UNLIKELY(get_token() != token_type::name_separator))  
+	    {  
+	        return sax->parse_error(m_lexer.get_position(),  
+	                                m_lexer.get_token_string(),  
+	                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::name_separator, "object separator"), nullptr));  
+	    }  
+		// 读入value，重入循环switch-case
+	    // parse values  
+	    get_token();  
+	    continue;
+	}  
+
+	// closing }  
+	// 如果是}则表示该对象处理结束了
+	if (JSON_HEDLEY_LIKELY(last_token == token_type::end_object))  
+	{  
+	    if (JSON_HEDLEY_UNLIKELY(!sax->end_object()))  
+	    {  
+	        return false;  
+	    }  
+	  
+	    // We are done with this object. Before we can parse a  
+	    // new value, we need to evaluate the new state first.    
+	    // By setting skip_to_state_evaluation to false, we    
+	    // are effectively jumping to the beginning of this if.    
+	    JSON_ASSERT(!states.empty());  
+	    // 当前处理完毕的对象出栈
+	    states.pop_back();
+	    // 跳过下一次switch-case  
+	    skip_to_state_evaluation = true;  
+	    continue;
+	}
+}
+```
+
+#### 小结
+
+到此，整个parse过程就圆满结束了。
+
+实际上，整个状态机的处理并不算复杂，设计上也是由`lexer`每次前置处理加工好下一个token，`parser`做状态机的流转：根据JSON的制式，对当前状态判定，如果合法，则跳转到下一步待处理的位置，如若非法则直接报错返回。
+
+## dump
+
+在看过了反序列化操作后，我们再来看一波反向操作：`dump`。
+
+`dump`是`basic_json`的序列化方法，他可以将整个json对象树序列化到`std::string`，即json字符串，这个过程相比反序列化则要简单得多。
+
+```cpp
+string_t dump(const int indent = -1,  
+              const char indent_char = ' ',  
+              const bool ensure_ascii = false,  
+              const error_handler_t error_handler = error_handler_t::strict) const  
+{  
+    string_t result;  
+    serializer s(detail::output_adapter<char, string_t>(result), indent_char, error_handler);  
+  
+    if (indent >= 0)  
+    {  
+        s.dump(*this, true, ensure_ascii, static_cast<unsigned int>(indent));  
+    }  
+    else  
+    {  
+        s.dump(*this, false, ensure_ascii, 0);  
+    }  
+  
+    return result;  
 }
 ```
